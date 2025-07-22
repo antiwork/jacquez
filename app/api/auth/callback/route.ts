@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const GH_CLIENT_ID = process.env.GH_CLIENT_ID || "Ov23liJ0xVB8vtPP1apH";
-const GH_CLIENT_SECRET = process.env.GH_CLIENT_SECRET;
-
-if (!GH_CLIENT_SECRET) {
-  throw new Error("GH_CLIENT_SECRET is required");
-}
+const GH_CLIENT_ID = process.env.GH_CLIENT_ID || process.env.GITHUB_CLIENT_ID || "Ov23liJ0xVB8vtPP1apH";
+const GH_CLIENT_SECRET = process.env.GH_CLIENT_SECRET || process.env.GITHUB_CLIENT_SECRET;
 
 export async function GET(request: NextRequest) {
+  if (!GH_CLIENT_SECRET) {
+    console.error("GH_CLIENT_SECRET is required but not configured");
+    return NextResponse.redirect(new URL("/?error=config_error", request.url));
+  }
+
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const state = searchParams.get("state");

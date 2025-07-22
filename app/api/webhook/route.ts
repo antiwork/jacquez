@@ -21,12 +21,12 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
 });
 
-// Create GitHub App instance
+// Create GitHub App instance (with fallback for build-time compatibility)
 const app = new App({
-  appId: process.env.GH_APP_ID!,
-  privateKey: process.env.GH_PRIVATE_KEY!,
+  appId: process.env.GH_APP_ID || process.env.APP_ID || "placeholder",
+  privateKey: process.env.GH_PRIVATE_KEY || process.env.PRIVATE_KEY || "placeholder",
   webhooks: {
-    secret: process.env.GH_WEBHOOK_SECRET!,
+    secret: process.env.GH_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET || "placeholder",
   },
 });
 
