@@ -5,13 +5,15 @@
   "main": "app.js",
   "type": "module",
   "scripts": {
-    "dev": "next dev",
+    "dev": "npx tsx utils/envChecker.ts && next dev",
+    "dev:no-check": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "env:check": "npx tsx utils/envChecker.ts"
   },
   "repository": {
     "type": "git",
