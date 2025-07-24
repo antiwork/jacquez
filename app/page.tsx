@@ -5,11 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Github } from "lucide-react";
 import { GithubCommentDemo } from "@/components/github-comment-demo";
-import { RepositorySettings } from "@/components/repository-settings";
 import { useAuth } from "@/lib/auth";
 
 export default function JacquezLandingPage() {
-  const { user, isAuthenticated } = useAuth();
+  const { isAuthenticated, loading } = useAuth();
 
   const handleLogout = async () => {
     try {
@@ -52,7 +51,12 @@ export default function JacquezLandingPage() {
                 </p>
               </div>
               <div className="flex flex-col gap-2 min-[400px]:flex-row">
-                {!isAuthenticated ? (
+                {loading ? (
+                  <div className="flex items-center">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-gray-900 dark:border-white mr-2"></div>
+                    <span className="text-sm">Loading...</span>
+                  </div>
+                ) : !isAuthenticated ? (
                   <Button
                     asChild
                     size="lg"
@@ -64,23 +68,30 @@ export default function JacquezLandingPage() {
                     </Link>
                   </Button>
                 ) : (
-                  <Button
-                    onClick={handleLogout}
-                    size="lg"
-                    className="bg-black dark:bg-white text-white dark:text-black hover:bg-black/90 dark:hover:bg-white/90"
-                  >
-                    Logout
-                  </Button>
+                  <div className="flex flex-col gap-2 min-[400px]:flex-row">
+                    <Button
+                      asChild
+                      size="lg"
+                      className="bg-black dark:bg-white text-white dark:text-black hover:bg-black/90 dark:hover:bg-white/90"
+                    >
+                      <Link href="/repository" prefetch={false}>
+                        Manage Repositories
+                      </Link>
+                    </Button>
+                    <Button
+                      onClick={handleLogout}
+                      size="lg"
+                      variant="outline"
+                    >
+                      Logout
+                    </Button>
+                  </div>
                 )}
               </div>
             </div>
             <div className="flex items-center justify-center">
               <Card className="bg-white dark:bg-black p-6 w-full max-w-none md:max-w-2xl md:mx-auto shadow-none md:shadow-lg rounded-none md:rounded-lg border-x-0 md:border-x">
-                {isAuthenticated ? (
-                  <RepositorySettings />
-                ) : (
-                  <GithubCommentDemo />
-                )}
+                <GithubCommentDemo />
               </Card>
             </div>
           </div>

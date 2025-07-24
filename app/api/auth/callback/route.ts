@@ -78,7 +78,7 @@ export async function GET(request: NextRequest) {
     const userData = await userResponse.json();
 
     // Create response and set secure cookies
-    const response = NextResponse.redirect(new URL("/", request.url));
+    const response = NextResponse.redirect(new URL("/repository", request.url));
 
     // Set secure cookies
     response.cookies.set("github_access_token", tokenData.access_token, {
