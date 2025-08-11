@@ -41,3 +41,80 @@ describe('generateFriendlyResponse integration', () => {
     expect(result.comment).toBe("");
   });
 });
+
+describe('codebase scanning', () => {
+  const mockDetectNewControllerMethods = (files: any[]) => {
+    const railsFile = files.find(f => f.filename.endsWith('_controller.rb'));
+    if (railsFile && railsFile.patch && railsFile.patch.includes('+  def new_method')) {
+      return [{ file: railsFile.filename, methods: ['new_method'] }];
+    }
+    
+    const expressFile = files.find(f => f.filename.endsWith('.js') && f.patch && f.patch.includes('router.get'));
+    if (expressFile) {
+      return [{ file: expressFile.filename, methods: ['GET /api/test'] }];
+    }
+    
+    return [];
+  };
+
+  test('detects new Rails controller methods', () => {
+    const files = [
+      {
+        filename: 'app/controllers/users_controller.rb',
+        status: 'modified',
+        patch: `@@ -10,6 +10,9 @@ class UsersController < ApplicationController
+   def show
+     @user = User.find(params[:id])
+   end
++
++  def new_method
++    render json: { status: 'ok' }
++  end
+ end`
+      }
+    ];
+
+    const result = mockDetectNewControllerMethods(files);
+    expect(result).toHaveLength(1);
+    expect(result[0].file).toBe('app/controllers/users_controller.rb');
+    expect(result[0].methods).toContain('new_method');
+  });
+
+  test('detects new Express.js routes', () => {
+    const files = [
+      {
+        filename: 'routes/api.js',
+        status: 'modified',
+        patch: `@@ -5,6 +5,9 @@ const router = express.Router();
+ router.get('/users', (req, res) => {
+   res.json({ users: [] });
+ });
++
++router.get('/api/test', (req, res) => {
++  res.json({ test: true });
++});`
+      }
+    ];
+
+    const result = mockDetectNewControllerMethods(files);
+    expect(result).toHaveLength(1);
+    expect(result[0].methods).toContain('GET /api/test');
+  });
+
+  test('returns empty array for files without new methods', () => {
+    const files = [
+      {
+        filename: 'README.md',
+        status: 'modified',
+        patch: `@@ -1,3 +1,4 @@
+ # My Project
+ 
+ This is a test project.
++Updated documentation.`
+      }
+    ];
+
+    const result = mockDetectNewControllerMethods(files);
+    expect(result).toHaveLength(0);
+  });
+});

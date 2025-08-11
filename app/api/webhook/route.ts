@@ -49,6 +49,183 @@ function containsAsideKeyword(content: string): boolean {
   return content.toLowerCase().includes("aside");
 }
 
+// Helper function to fetch PR file changes
+async function fetchPRFiles(
+  octokit: any,
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<any[]> {
+  try {
+    const response = await octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+      {
+        owner,
+        repo,
+        pull_number: prNumber,
+      }
+    );
+    return response.data || [];
+  } catch (error: any) {
+    log("ERROR", `Failed to fetch PR files`, {
+      error: error.message,
+      owner,
+      repo,
+      prNumber,
+    });
+    return [];
+  }
+}
+
+// Helper function to detect new controller methods in file changes
+function detectNewControllerMethods(files: any[]): Array<{file: string, methods: string[]}> {
+  const controllerMethods: Array<{file: string, methods: string[]}> = [];
+  
+  const patterns = {
+    rails: {
+      filePattern: /_controller\.rb$/,
+      methodPattern: /^\+.*def\s+([a-zA-Z_][a-zA-Z0-9_]*)/gm
+    },
+    express: {
+      filePattern: /\.(js|ts)$/,
+      methodPattern: /^\+.*router\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/gm
+    },
+    django: {
+      filePattern: /views\.py$/,
+      methodPattern: /^\+.*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*request/gm
+    },
+    aspnet: {
+      filePattern: /Controller\.cs$/,
+      methodPattern: /^\+.*\[Http(Get|Post|Put|Delete|Patch)\][\s\S]*?public.*?\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gm
+    }
+  };
+
+  for (const file of files) {
+    if (file.status !== 'added' && file.status !== 'modified') continue;
+    if (!file.patch) continue;
+
+    const methods: string[] = [];
+    
+    for (const [framework, config] of Object.entries(patterns)) {
+      if (config.filePattern.test(file.filename)) {
+        let match;
+        while ((match = config.methodPattern.exec(file.patch)) !== null) {
+          if (framework === 'express') {
+            methods.push(`${match[1].toUpperCase()} ${match[2]}`);
+          } else if (framework === 'aspnet') {
+            methods.push(`${match[1]} ${match[2]}`);
+          } else {
+            methods.push(match[1]);
+          }
+        }
+        break;
+      }
+    }
+
+    if (methods.length > 0) {
+      controllerMethods.push({
+        file: file.filename,
+        methods
+      });
+    }
+  }
+
+  return controllerMethods;
+}
+
+// Helper function to check for existing specs
+async function checkForSpecs(
+  octokit: any,
+  owner: string,
+  repo: string,
+  controllerFile: string,
+  methods: string[]
+): Promise<{existing: string[], missing: string[]}> {
+  const testPaths = generateTestPaths(controllerFile);
+  const existing: string[] = [];
+  const missing: string[] = [...methods];
+
+  for (const testPath of testPaths) {
+    try {
+      const response = await octokit.request(
+        "GET /repos/{owner}/{repo}/contents/{path}",
+        {
+          owner,
+          repo,
+          path: testPath,
+        }
+      );
+
+      if (response.data.content) {
+        const testContent = Buffer.from(response.data.content, "base64").toString("utf-8");
+        
+        for (let i = missing.length - 1; i >= 0; i--) {
+          const method = missing[i];
+          if (hasSpecForMethod(testContent, method, controllerFile)) {
+            existing.push(method);
+            missing.splice(i, 1);
+          }
+        }
+      }
+    } catch (error) {
+      continue;
+    }
+  }
+
+  return { existing, missing };
+}
+
+// Helper function to generate possible test file paths
+function generateTestPaths(controllerFile: string): string[] {
+  const paths: string[] = [];
+  const baseName = controllerFile.replace(/\.(rb|js|ts|py|cs)$/, '');
+  const fileName = baseName.split('/').pop() || baseName;
+
+  if (controllerFile.endsWith('_controller.rb')) {
+    const specName = fileName.replace('_controller', '_controller_spec');
+    paths.push(`spec/controllers/${specName}.rb`);
+    paths.push(`spec/${specName}.rb`);
+    paths.push(`test/controllers/${fileName}_test.rb`);
+  } else if (controllerFile.endsWith('.js') || controllerFile.endsWith('.ts')) {
+    const ext = controllerFile.endsWith('.ts') ? 'ts' : 'js';
+    paths.push(`${baseName}.test.${ext}`);
+    paths.push(`${baseName}.spec.${ext}`);
+    paths.push(`__tests__/${fileName}.test.${ext}`);
+    paths.push(`test/${fileName}.test.${ext}`);
+  } else if (controllerFile.endsWith('views.py')) {
+    paths.push(`test_${fileName}.py`);
+    paths.push(`tests/test_${fileName}.py`);
+    paths.push(`${baseName}_test.py`);
+  } else if (controllerFile.endsWith('Controller.cs')) {
+    const testName = fileName.replace('Controller', 'ControllerTests');
+    paths.push(`${baseName}Tests.cs`);
+    paths.push(`Tests/${testName}.cs`);
+  }
+
+  return paths;
+}
+
+// Helper function to check if test content has spec for method
+function hasSpecForMethod(testContent: string, method: string, controllerFile: string): boolean {
+  const lowerContent = testContent.toLowerCase();
+  const lowerMethod = method.toLowerCase();
+  
+  const patterns = [
+    `describe.*${lowerMethod}`,
+    `it.*${lowerMethod}`,
+    `test.*${lowerMethod}`,
+    `def.*test.*${lowerMethod}`,
+    `"${lowerMethod}"`,
+    `'${lowerMethod}'`,
+    `\`${lowerMethod}\``,
+  ];
+
+  return patterns.some(pattern => {
+    const regex = new RegExp(pattern, 'i');
+    return regex.test(lowerContent);
+  });
+}
+
 // Helper function to fetch comment thread for issues and PRs
 async function fetchCommentThread(
   octokit: any,
@@ -167,7 +344,8 @@ async function generateFriendlyResponse(
   submissionContent: string,
   submissionType: string,
   repoInfo: any = null,
-  commentThreadContext: string = ""
+  commentThreadContext: string = "",
+  codebaseAnalysis: string = ""
 ): Promise<{ comment_needed: boolean; comment: string; reasoning: string }> {
   try {
     log("INFO", `Generating AI response for ${submissionType}`);
@@ -178,6 +356,7 @@ ONLY comment for these specific violations:
 - Issues missing required "What" and "Why" sections
 - Pull requests without "Closes #123" or "Fixes #456" references to existing issues  
 - Pull requests with UI changes missing before/after screenshots/videos
+- New controller methods missing required specs (when guidelines specify spec requirements)
 - Submissions that are clearly incomplete or unreadable
 
 DO NOT comment for:
@@ -206,6 +385,8 @@ If commenting, be direct and specific about what's missing without patronizing l
             type: "text",
             text: `${
               commentThreadContext ? `\n${commentThreadContext}\n` : ""
+            }${
+              codebaseAnalysis ? `\n${codebaseAnalysis}\n` : ""
             }
 
 Submission type: ${submissionType}
@@ -302,13 +483,50 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
         prNumber
       );
 
+      let codebaseAnalysis = "";
+      
+      // Check if contributing guidelines mention spec requirements
+      const requiresSpecs = contributingContent.toLowerCase().includes('spec') || 
+                           contributingContent.toLowerCase().includes('test');
+      
+      if (requiresSpecs) {
+        log("INFO", `Contributing guidelines require specs, analyzing codebase`, repoInfo);
+        
+        const prFiles = await fetchPRFiles(octokit, owner, repo, prNumber);
+        const newMethods = detectNewControllerMethods(prFiles);
+        
+        if (newMethods.length > 0) {
+          log("INFO", `Detected ${newMethods.length} files with new controller methods`, {
+            ...repoInfo,
+            methods: newMethods
+          });
+          
+          const missingSpecs = [];
+          for (const {file, methods} of newMethods) {
+            const specs = await checkForSpecs(octokit, owner, repo, file, methods);
+            if (specs.missing.length > 0) {
+              missingSpecs.push({file, methods: specs.missing});
+            }
+          }
+          
+          if (missingSpecs.length > 0) {
+            codebaseAnalysis = `Codebase Analysis: New controller methods detected without corresponding specs:\n${missingSpecs.map(item => `- ${item.file}: ${item.methods.join(', ')}`).join('\n')}`;
+            log("INFO", `Found controller methods missing specs`, {
+              ...repoInfo,
+              missingSpecs
+            });
+          }
+        }
+      }
+
       // Generate response using Claude to check against guidelines
       const response = await generateFriendlyResponse(
         contributingContent,
         prBody,
         "pull request",
         repoInfo,
-        commentThreadContext
+        commentThreadContext,
+        codebaseAnalysis
       );
 
       // Only post comment if there are clear violations
