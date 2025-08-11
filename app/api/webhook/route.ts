@@ -79,59 +79,120 @@ async function fetchPRFiles(
 }
 
 // Helper function to detect new controller methods in file changes
-function detectNewControllerMethods(files: any[]): Array<{file: string, methods: string[]}> {
+async function detectNewControllerMethods(files: any[]): Promise<Array<{file: string, methods: string[]}>> {
   const controllerMethods: Array<{file: string, methods: string[]}> = [];
   
-  const patterns = {
-    rails: {
-      filePattern: /_controller\.rb$/,
-      methodPattern: /^\+.*def\s+([a-zA-Z_][a-zA-Z0-9_]*)/gm
-    },
-    express: {
-      filePattern: /\.(js|ts)$/,
-      methodPattern: /^\+.*router\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/gm
-    },
-    django: {
-      filePattern: /views\.py$/,
-      methodPattern: /^\+.*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*request/gm
-    },
-    aspnet: {
-      filePattern: /Controller\.cs$/,
-      methodPattern: /^\+.*\[Http(Get|Post|Put|Delete|Patch)\][\s\S]*?public.*?\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/gm
-    }
-  };
-
   for (const file of files) {
     if (file.status !== 'added' && file.status !== 'modified') continue;
     if (!file.patch) continue;
-
-    const methods: string[] = [];
     
-    for (const [framework, config] of Object.entries(patterns)) {
-      if (config.filePattern.test(file.filename)) {
-        let match;
-        while ((match = config.methodPattern.exec(file.patch)) !== null) {
-          if (framework === 'express') {
-            methods.push(`${match[1].toUpperCase()} ${match[2]}`);
-          } else if (framework === 'aspnet') {
-            methods.push(`${match[1]} ${match[2]}`);
-          } else {
-            methods.push(match[1]);
-          }
-        }
-        break;
+    if (!isLikelyControllerFile(file.filename)) continue;
+    
+    try {
+      const methods = await detectMethodsWithAI(file.filename, file.patch);
+      if (methods.length > 0) {
+        controllerMethods.push({
+          file: file.filename,
+          methods
+        });
       }
-    }
-
-    if (methods.length > 0) {
-      controllerMethods.push({
-        file: file.filename,
-        methods
+    } catch (error: any) {
+      log("ERROR", `Error detecting methods in ${file.filename}`, {
+        error: error.message,
+        filename: file.filename
       });
     }
   }
-
+  
   return controllerMethods;
+}
+
+// Helper function to check if a file is likely a controller/route file
+function isLikelyControllerFile(filename: string): boolean {
+  const lowerFilename = filename.toLowerCase();
+  
+  const patterns = [
+    '_controller.rb',     // Rails controllers
+    'controller.cs',      // ASP.NET controllers
+    'views.py',          // Django views
+    '/routes/',          // Express routes directory
+    '/controllers/',     // General controllers directory
+    'router.js',         // Express router files
+    'router.ts',         // TypeScript router files
+    'api.js',           // API files
+    'api.ts',           // TypeScript API files
+  ];
+  
+  return patterns.some(pattern => lowerFilename.includes(pattern));
+}
+
+async function detectMethodsWithAI(filename: string, patch: string): Promise<string[]> {
+  const systemPrompt = `You are a code analysis AI that detects new controller methods, API endpoints, or route handlers in code diffs.
+
+Analyze the provided git patch and identify any NEW methods/functions/endpoints that were ADDED (lines starting with +).
+
+Look for:
+- Rails controller methods (def method_name)
+- Express.js routes (router.get/post/put/delete, app.get/post/put/delete)
+- Django view functions (def function_name)
+- ASP.NET controller actions (public methods in controllers)
+- API endpoint handlers
+- Route definitions
+
+Return ONLY the method/endpoint names that were newly added, not existing ones.
+
+Response format (JSON array):
+["method1", "method2", "GET /api/endpoint"]
+
+For HTTP routes, include the HTTP method and path (e.g., "GET /api/users").
+For regular methods, just return the method name.
+Return empty array [] if no new methods found.`;
+
+  const messages: Anthropic.Messages.MessageParam[] = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `File: ${filename}\n\nGit patch:\n${patch}`,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: "[",
+    },
+  ];
+
+  const response = await anthropic.messages.create({
+    model: config.aiModel,
+    max_tokens: config.maxTokens,
+    system: systemPrompt,
+    messages: messages,
+  });
+
+  const aiResponse = response.content[0].type === "text" ? response.content[0].text : "";
+  
+  try {
+    const fullJsonResponse = "[" + aiResponse;
+    const methods = JSON.parse(fullJsonResponse);
+    return Array.isArray(methods) ? methods : [];
+  } catch (parseError: any) {
+    try {
+      const repairedJson = jsonrepair("[" + aiResponse);
+      const methods = JSON.parse(repairedJson);
+      return Array.isArray(methods) ? methods : [];
+    } catch (repairError: any) {
+      log("ERROR", `Failed to parse AI response for method detection`, {
+        filename,
+        aiResponse,
+        parseError: parseError instanceof Error ? parseError.message : String(parseError),
+        repairError: repairError instanceof Error ? repairError.message : String(repairError)
+      });
+      return [];
+    }
+  }
 }
 
 // Helper function to check for existing specs
@@ -609,7 +670,7 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
         log("INFO", `Contributing guidelines require code review, analyzing codebase`, repoInfo);
         
         const prFiles = await fetchPRFiles(octokit, owner, repo, prNumber);
-        const newMethods = detectNewControllerMethods(prFiles);
+        const newMethods = await detectNewControllerMethods(prFiles);
         
         if (newMethods.length > 0) {
           log("INFO", `Detected ${newMethods.length} files with new controller methods`, {
