@@ -6,6 +6,12 @@ export interface AIResponse {
   reasoning: string;
 }
 
+export interface CodeRulesResponse {
+  requiresCodeReview: boolean;
+  rules: string[];
+  reasoning: string;
+}
+
 export function parseAIResponse(aiResponse: string): AIResponse {
   try {
     const fullJsonResponse = "{" + aiResponse;

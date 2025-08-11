@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { App } from "octokit";
 import Anthropic from "@anthropic-ai/sdk";
 import { parseAIResponse } from "../../../utils/jsonParser";
+import { jsonrepair } from 'jsonrepair';
 
 // Configuration
 const config = {
@@ -224,6 +225,123 @@ function hasSpecForMethod(testContent: string, method: string, controllerFile: s
     const regex = new RegExp(pattern, 'i');
     return regex.test(lowerContent);
   });
+}
+
+// Helper function to extract code rules from contributing guidelines using AI
+async function extractCodeRules(
+  contributingContent: string,
+  repoInfo: any = null
+): Promise<{ requiresCodeReview: boolean; rules: string[]; reasoning: string }> {
+  try {
+    log("INFO", `Extracting code rules from contributing guidelines using AI`);
+
+    const systemPrompt = `You are an AI assistant that analyzes contributing guidelines to extract specific code review rules. Your job is to determine if the guidelines require code review for new controller methods, functions, or similar code additions.
+
+Look for rules about:
+- Testing requirements (unit tests, specs, test coverage)
+- Documentation requirements for new methods/functions
+- Code review requirements for new functionality
+- Specific requirements for controller methods, API endpoints, or similar
+
+Response format (JSON):
+- requiresCodeReview: boolean (true if guidelines require any form of code review/testing for new methods)
+- rules: array of strings (specific rules found, e.g., ["Tests required for new methods", "Documentation required"])
+- reasoning: string (brief explanation of what was found)
+
+Only return true for requiresCodeReview if there are clear, specific requirements for new code additions.`;
+
+    const messages: Anthropic.Messages.MessageParam[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `Contributing guidelines to analyze:\n${contributingContent}`,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: "{",
+      },
+    ];
+
+    const response = await anthropic.messages.create({
+      model: config.aiModel,
+      max_tokens: config.maxTokens,
+      system: systemPrompt,
+      messages: messages,
+    });
+
+    const aiResponse =
+      response.content[0].type === "text" ? response.content[0].text : "";
+
+    const result = parseCodeRulesResponse(aiResponse);
+
+    log("INFO", `Code rules extracted successfully`, {
+      requiresCodeReview: result.requiresCodeReview,
+      rules: result.rules,
+      repoInfo,
+      usage: response.usage,
+    });
+
+    return result;
+  } catch (error: any) {
+    log("ERROR", `Error extracting code rules`, {
+      error: error.message,
+      stack: error.stack,
+      repoInfo,
+    });
+
+    return {
+      requiresCodeReview: false,
+      rules: [],
+      reasoning: "Error occurred during code rules extraction, skipping code review",
+    };
+  }
+}
+
+// Helper function to parse AI response for code rules extraction
+function parseCodeRulesResponse(aiResponse: string): { requiresCodeReview: boolean; rules: string[]; reasoning: string } {
+  try {
+    const fullJsonResponse = "{" + aiResponse;
+    const parsedResponse = JSON.parse(fullJsonResponse);
+    
+    return {
+      requiresCodeReview: parsedResponse.requiresCodeReview || false,
+      rules: Array.isArray(parsedResponse.rules) ? parsedResponse.rules : [],
+      reasoning: parsedResponse.reasoning || "",
+    };
+  } catch (parseError) {
+    try {
+      const fullJsonResponse = "{" + aiResponse;
+      const repairedJson = jsonrepair(fullJsonResponse);
+      const parsedResponse = JSON.parse(repairedJson);
+      
+      if (parsedResponse.hasOwnProperty('requiresCodeReview')) {
+        return {
+          requiresCodeReview: parsedResponse.requiresCodeReview || false,
+          rules: Array.isArray(parsedResponse.rules) ? parsedResponse.rules : [],
+          reasoning: parsedResponse.reasoning || "Repaired from malformed JSON response",
+        };
+      }
+    } catch (repairError) {
+      const lowerResponse = aiResponse.toLowerCase();
+      const hasTestKeywords = lowerResponse.includes('test') || lowerResponse.includes('spec');
+      return {
+        requiresCodeReview: hasTestKeywords,
+        rules: hasTestKeywords ? ["Testing requirements detected"] : [],
+        reasoning: "Failed to parse AI response, using fallback keyword detection",
+      };
+    }
+  }
+  
+  return {
+    requiresCodeReview: false,
+    rules: [],
+    reasoning: "Failed to parse code rules response",
+  };
 }
 
 // Helper function to fetch comment thread for issues and PRs
@@ -485,12 +603,10 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
 
       let codebaseAnalysis = "";
       
-      // Check if contributing guidelines mention spec requirements
-      const requiresSpecs = contributingContent.toLowerCase().includes('spec') || 
-                           contributingContent.toLowerCase().includes('test');
+      const codeRules = await extractCodeRules(contributingContent, repoInfo);
       
-      if (requiresSpecs) {
-        log("INFO", `Contributing guidelines require specs, analyzing codebase`, repoInfo);
+      if (codeRules.requiresCodeReview) {
+        log("INFO", `Contributing guidelines require code review, analyzing codebase`, repoInfo);
         
         const prFiles = await fetchPRFiles(octokit, owner, repo, prNumber);
         const newMethods = detectNewControllerMethods(prFiles);
@@ -510,10 +626,11 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
           }
           
           if (missingSpecs.length > 0) {
-            codebaseAnalysis = `Codebase Analysis: New controller methods detected without corresponding specs:\n${missingSpecs.map(item => `- ${item.file}: ${item.methods.join(', ')}`).join('\n')}`;
-            log("INFO", `Found controller methods missing specs`, {
+            codebaseAnalysis = `Codebase Analysis based on extracted rules (${codeRules.rules.join(', ')}):\nNew controller methods detected without corresponding specs:\n${missingSpecs.map(item => `- ${item.file}: ${item.methods.join(', ')}`).join('\n')}`;
+            log("INFO", `Found controller methods missing specs based on extracted rules`, {
               ...repoInfo,
-              missingSpecs
+              missingSpecs,
+              extractedRules: codeRules.rules
             });
           }
         }
