@@ -51,8 +51,12 @@ export async function loadContributingGuidelines(
         console.log(`Contributing guidelines found at ${path} for ${cacheKey}`)
         return content
       }
-    } catch (error: any) {
-      console.log(`Failed to load contributing guidelines from ${path}: ${error.message}`)
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        console.log(`Failed to load contributing guidelines from ${path}: ${error.message}`);
+      } else {
+        console.log(`Failed to load contributing guidelines from ${path}: Unknown error`);
+      }
     }
   }
 
