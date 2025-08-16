@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:action": "tsc --project tsconfig.action.json && cp -r utils dist/ && cp package.json dist/",
+    "test:action": "npm run build:action && node test-action-build.js",
     "start": "next start",
     "lint": "next lint",
     "test": "jest",
@@ -25,6 +27,8 @@
   },
   "homepage": "https://github.com/antiwork/jacquez#readme",
   "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.1",
     "@anthropic-ai/sdk": "^0.56.0",
     "@radix-ui/react-avatar": "^1.1.10",
     "@radix-ui/react-slot": "^1.2.3",

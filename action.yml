@@ -1,0 +1,48 @@
+name: 'Jacquez - Contributing Guidelines Enforcer'
+description: 'A GitHub Action that enforces contributing guidelines on Pull Requests'
+author: 'antiwork'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+    default: ${{ github.token }}
+  anthropic-api-key:
+    description: 'Anthropic API key for AI analysis'
+    required: true
+  ai-model:
+    description: 'AI model to use for analysis'
+    required: false
+    default: 'claude-sonnet-4-20250514'
+  max-tokens:
+    description: 'Maximum tokens for AI response'
+    required: false
+    default: '300'
+  enable-detailed-logging:
+    description: 'Enable detailed logging'
+    required: false
+    default: 'false'
+  fail-on-violations:
+    description: 'Whether to fail the action when violations are found'
+    required: false
+    default: 'true'
+  skip-drafts:
+    description: 'Skip analysis for draft PRs'
+    required: false
+    default: 'true'
+
+outputs:
+  violations-found:
+    description: 'Whether any violations were found'
+  violation-count:
+    description: 'Number of violations found'
+  analysis-summary:
+    description: 'Summary of the analysis results'
+
+runs:
+  using: 'node20'
+  main: 'dist/action.js'
