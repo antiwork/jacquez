@@ -83,7 +83,7 @@ export async function createCheckRun({
       output: {
         title,
         summary,
-        annotations: annotations.slice(0, 50) 
+        annotations: annotations.slice(0, 50) // GitHub API limits annotations to 50 per check run 
       }
     })
 
