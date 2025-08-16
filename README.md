@@ -1,6 +1,6 @@
 # Jacquez
 
-A friendly moderator for OSS repos
+A friendly moderator for OSS repos that posts helpful comments and can optionally trigger CI validation.
 
 ## Prerequisites
 
@@ -58,6 +58,7 @@ npm start
 ```
 
 The server will start on port 3000 and display:
+
 ```
 GitHub App server is running on port 3000
 Webhook URL: http://localhost:3000/webhook
@@ -70,6 +71,25 @@ For production deployment, ensure environment variables are set and run:
 ```bash
 NODE_ENV=production npm start
 ```
+
+## How It Works
+
+Jacquez operates as a **GitHub App** that:
+
+1. **Posts helpful comments** on issues and PRs when guidelines are violated
+2. **Optionally triggers CI validation** to fail builds for stricter enforcement
+
+### Features
+
+- 💬 **Comment-based guidance** - Helps contributors understand requirements
+- ❌ **Optional CI enforcement** - Can fail builds to prevent merging violations
+- 🤖 **Handles multiple events** - Works on issues, PRs, and comments
+- 📖 **Guideline integration** - Uses your repository's CONTRIBUTING.md file
+
+### Setup Options
+
+- **Basic setup**: Install the GitHub App for comment-based guidance
+- **Enhanced enforcement**: Add the validation workflow to trigger CI checks
 
 ## Testing
 
@@ -84,7 +104,6 @@ NODE_ENV=production npm start
    - Opening an issue in a repository where your app is installed
    - Opening a pull request
    - Commenting on an issue
-
 
 ## License
 

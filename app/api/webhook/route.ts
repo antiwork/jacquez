@@ -2,12 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { App } from "octokit";
 import Anthropic from "@anthropic-ai/sdk";
 import { parseAIResponse } from "../../../utils/jsonParser";
-import { 
-  fetchPRFiles, 
-  parseDiffForChangedLines, 
-  generateCodeAnalysisResponse, 
-  handlePullRequestCodeReview 
-} from "../../../utils/prCodeReview";
+import { handlePullRequestCodeReview } from "../../../utils/prCodeReview";
 
 // Configuration
 const config = {
@@ -65,7 +60,7 @@ async function fetchCommentThread(
 ): Promise<string> {
   try {
     log("INFO", `Fetching comment thread for ${owner}/${repo}#${issueNumber}`);
-    
+
     const response = await octokit.request(
       "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
       {
@@ -74,7 +69,7 @@ async function fetchCommentThread(
         issue_number: issueNumber,
         per_page: maxComments,
         sort: "created",
-        direction: "asc"
+        direction: "asc",
       }
     );
 
@@ -93,13 +88,16 @@ async function fetchCommentThread(
 
     return `Previous comments in this thread:\n\n${commentThread}`;
   } catch (error: any) {
-    log("ERROR", `Error fetching comment thread for ${owner}/${repo}#${issueNumber}`, {
-      error: error.message,
-    });
+    log(
+      "ERROR",
+      `Error fetching comment thread for ${owner}/${repo}#${issueNumber}`,
+      {
+        error: error.message,
+      }
+    );
     return "Unable to fetch previous comments.";
   }
 }
-
 
 // Helper function to load contributing.md from repository with caching
 async function loadContributingGuidelines(
@@ -204,9 +202,7 @@ If commenting, be direct and specific about what's missing without patronizing l
           },
           {
             type: "text",
-            text: `${
-              commentThreadContext ? `\n${commentThreadContext}\n` : ""
-            }
+            text: `${commentThreadContext ? `\n${commentThreadContext}\n` : ""}
 
 Submission type: ${submissionType}
 Submission content:
@@ -250,11 +246,79 @@ ${submissionContent}`,
     return {
       comment_needed: false,
       comment: "",
-      reasoning: "Error occurred during AI analysis, skipping comment to avoid spam",
+      reasoning:
+        "Error occurred during AI analysis, skipping comment to avoid spam",
     };
   }
 }
 
+// Create GitHub check run for PR validation
+async function createPRValidationCheck(
+  octokit: any,
+  owner: string,
+  repo: string,
+  sha: string,
+  prBody: string,
+  contributingContent: string,
+  repoInfo: any
+) {
+  try {
+    log("INFO", "Creating PR validation check", repoInfo);
+
+    // Create a check run
+    const checkRun = await octokit.request(
+      "POST /repos/{owner}/{repo}/check-runs",
+      {
+        owner,
+        repo,
+        name: "Jacquez Guidelines Check",
+        head_sha: sha,
+        status: "in_progress",
+        started_at: new Date().toISOString(),
+      }
+    );
+
+    // Use the same validation logic as comments
+    const response = await generateFriendlyResponse(
+      contributingContent,
+      prBody,
+      "pull request",
+      repoInfo
+    );
+
+    // Update check run with results
+    const conclusion = response.comment_needed ? "failure" : "success";
+    const summary = response.comment_needed
+      ? "❌ Contributing guidelines violations found"
+      : "✅ All contributing guidelines checks passed";
+
+    await octokit.request(
+      "PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}",
+      {
+        owner,
+        repo,
+        check_run_id: checkRun.data.id,
+        status: "completed",
+        conclusion,
+        completed_at: new Date().toISOString(),
+        output: {
+          title: "Jacquez Guidelines Check",
+          summary,
+          text: response.comment_needed
+            ? response.comment
+            : "Great job! Your PR follows all contributing guidelines.",
+        },
+      }
+    );
+
+    log("INFO", `PR validation check completed: ${conclusion}`, repoInfo);
+  } catch (error: any) {
+    log("ERROR", "Failed to create PR validation check", {
+      error: error.message,
+      ...repoInfo,
+    });
+  }
+}
 
 // Handle pull request opened events
 async function handlePullRequestOpened({ octokit, payload }: any) {
@@ -324,13 +388,15 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
           }
         );
 
-        log("INFO", `Comment posted successfully for PR`, { ...repoInfo, reasoning: response.reasoning });
+        log("INFO", `Comment posted successfully for PR`, {
+          ...repoInfo,
+          reasoning: response.reasoning,
+        });
       } else {
-        log(
-          "INFO",
-          `No clear violations found, skipping comment for PR`,
-          { ...repoInfo, reasoning: response.reasoning }
-        );
+        log("INFO", `No clear violations found, skipping comment for PR`, {
+          ...repoInfo,
+          reasoning: response.reasoning,
+        });
       }
     } else {
       // No contributing guidelines found, send generic welcome
@@ -347,13 +413,26 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
       log("INFO", `Generic welcome comment posted for PR`, repoInfo);
     }
 
-    await handlePullRequestCodeReview({ 
-      octokit, 
-      payload, 
-      loadContributingGuidelines, 
-      anthropic, 
-      config 
+    await handlePullRequestCodeReview({
+      octokit,
+      payload,
+      loadContributingGuidelines,
+      anthropic,
+      config,
     });
+
+    // Create GitHub check run for validation
+    if (contributingContent) {
+      await createPRValidationCheck(
+        octokit,
+        owner,
+        repo,
+        payload.pull_request.head.sha,
+        prBody,
+        contributingContent,
+        repoInfo
+      );
+    }
   } catch (error: any) {
     log("ERROR", `Error handling pull request opened event`, {
       error: error.message,
@@ -426,13 +505,15 @@ async function handleIssueOpened({ octokit, payload }: any) {
           }
         );
 
-        log("INFO", `Comment posted successfully for issue`, { ...repoInfo, reasoning: response.reasoning });
+        log("INFO", `Comment posted successfully for issue`, {
+          ...repoInfo,
+          reasoning: response.reasoning,
+        });
       } else {
-        log(
-          "INFO",
-          `No clear violations found, skipping comment for issue`,
-          { ...repoInfo, reasoning: response.reasoning }
-        );
+        log("INFO", `No clear violations found, skipping comment for issue`, {
+          ...repoInfo,
+          reasoning: response.reasoning,
+        });
       }
     } else {
       // No contributing guidelines found, send generic welcome
@@ -491,7 +572,11 @@ async function handleIssueCommentCreated({ octokit, payload }: any) {
       // Check if comment meets minimum length requirement
       if (commentBody.length > config.minCommentLength) {
         if (containsAsideKeyword(commentBody)) {
-          log("INFO", `Skipping comment analysis due to "aside" keyword`, repoInfo);
+          log(
+            "INFO",
+            `Skipping comment analysis due to "aside" keyword`,
+            repoInfo
+          );
           return;
         }
 
@@ -525,9 +610,15 @@ async function handleIssueCommentCreated({ octokit, payload }: any) {
             }
           );
 
-          log("INFO", "Comment posted successfully", { ...repoInfo, reasoning: response.reasoning });
+          log("INFO", "Comment posted successfully", {
+            ...repoInfo,
+            reasoning: response.reasoning,
+          });
         } else {
-          log("INFO", "No clear violations found, skipping comment", { ...repoInfo, reasoning: response.reasoning });
+          log("INFO", "No clear violations found, skipping comment", {
+            ...repoInfo,
+            reasoning: response.reasoning,
+          });
         }
       } else {
         log(
@@ -552,10 +643,11 @@ async function handleIssueCommentCreated({ octokit, payload }: any) {
   }
 }
 
-
 // Register event listeners
 app.webhooks.on("pull_request.opened", handlePullRequestOpened);
-// app.webhooks.on("issues.opened", handleIssueOpened);
+// app.webhooks.on("pull_request.edited", handlePullRequestOpened);
+app.webhooks.on("pull_request.synchronize", handlePullRequestOpened);
+app.webhooks.on("issues.opened", handleIssueOpened);
 // app.webhooks.on("issue_comment.created", handleIssueCommentCreated);
 
 export async function POST(request: NextRequest) {
