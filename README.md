@@ -89,3 +89,4 @@ NODE_ENV=production npm start
 ## License
 
 This project is licensed under the MIT License.
+test: jacquez app check
