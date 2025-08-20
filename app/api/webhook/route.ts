@@ -6,7 +6,10 @@ import {
   fetchPRFiles, 
   parseDiffForChangedLines, 
   generateCodeAnalysisResponse, 
-  handlePullRequestCodeReview 
+  handlePullRequestCodeReview,
+  handlePullRequestCodeReviewWithViolations,
+  createCheckRun,
+  updateCheckRun
 } from "../../../utils/prCodeReview";
 
 // Configuration
@@ -380,6 +383,7 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
   const repo = payload.repository.name;
   const prNumber = payload.pull_request.number;
   const prBody = payload.pull_request.body || "";
+  const headSha = payload.pull_request.head.sha;
   const repoInfo = { owner, repo, prNumber };
 
   log("INFO", `Pull request opened`, {
@@ -400,7 +404,14 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
     return;
   }
 
+  let checkRunId: number | null = null;
+  const violations: string[] = [];
+
   try {
+    // Create check run at the start
+    checkRunId = await createCheckRun(octokit, owner, repo, headSha, prNumber);
+    log("INFO", `Created check run ${checkRunId}`, repoInfo);
+
     // Load contributing guidelines
     const contributingContent = await loadContributingGuidelines(
       octokit,
@@ -411,6 +422,7 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
     if (contributingContent) {
       if (containsAsideKeyword(prBody)) {
         log("INFO", `Skipping PR analysis due to "aside" keyword`, repoInfo);
+        await updateCheckRun(octokit, owner, repo, checkRunId, "success", []);
         return;
       }
 
@@ -430,8 +442,10 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
         commentThreadContext
       );
 
-      // Only post comment if there are clear violations
+      // Track PR description violations
       if (response.comment_needed) {
+        violations.push(`PR Description: ${response.reasoning}`);
+        
         await octokit.request(
           "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
           {
@@ -475,19 +489,67 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
       }
     }
 
-    await handlePullRequestCodeReview({ 
+    // Handle code review and track violations
+    const codeViolations = await handlePullRequestCodeReviewWithViolations({ 
       octokit, 
       payload, 
       loadContributingGuidelines, 
       anthropic, 
       config 
     });
+    
+    violations.push(...codeViolations);
+
+    // Update check run based on violations
+    const hasViolations = violations.length > 0;
+    await updateCheckRun(
+      octokit, 
+      owner, 
+      repo, 
+      checkRunId, 
+      hasViolations ? "failure" : "success", 
+      violations
+    );
+
+    // Post summary comment if there are violations
+    if (hasViolations) {
+      const summaryComment = `## 🚫 Contributing Guidelines Violations
+
+The following issues were found in your PR:
+
+${violations.map(v => `• ${v}`).join('\n')}
+
+**To rerun this check:** Leave a new comment mentioning @jacquez and ask it to review your changes again.
+
+Please address these issues and update your PR. The check will automatically re-run when you push new commits.`;
+
+      await octokit.request(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        {
+          owner: owner,
+          repo: repo,
+          issue_number: prNumber,
+          body: summaryComment,
+        }
+      );
+
+      log("INFO", `Posted summary comment for ${violations.length} violations`, repoInfo);
+    }
+
   } catch (error: any) {
     log("ERROR", `Error handling pull request opened event`, {
       error: error.message,
       stack: error.stack,
       ...repoInfo,
     });
+
+    if (checkRunId) {
+      try {
+        await updateCheckRun(octokit, owner, repo, checkRunId, "failure", ["Internal error during review"]);
+      } catch (updateError: any) {
+        log("ERROR", `Failed to update check run after error`, { updateError: updateError.message, ...repoInfo });
+      }
+    }
   }
 }
 
