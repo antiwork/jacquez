@@ -101,14 +101,94 @@ async function fetchCommentThread(
 }
 
 
-// Helper function to load contributing.md from repository with caching
+// Helper function to extract markdown links from content
+function extractMarkdownLinks(content: string): Array<{text: string, url: string}> {
+  const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+  const links: Array<{text: string, url: string}> = [];
+  let match;
+  
+  while ((match = linkRegex.exec(content)) !== null) {
+    links.push({
+      text: match[1],
+      url: match[2]
+    });
+  }
+  
+  return links;
+}
+
+// Helper function to resolve relative URLs to raw GitHub URLs
+function resolveGitHubUrl(url: string, owner: string, repo: string): string | null {
+  if (url.startsWith('http')) {
+    if (url.includes('github.com') && url.includes(owner) && url.includes(repo)) {
+      return url.replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/').replace('/tree/', '/');
+    }
+    return null; // Skip non-GitHub URLs
+  }
+  
+  // Handle relative URLs - convert to raw GitHub URL
+  const cleanUrl = url.startsWith('./') ? url.substring(2) : url;
+  return `https://raw.githubusercontent.com/${owner}/${repo}/main/${cleanUrl}`;
+}
+
+// Helper function to fetch content from URL
+async function fetchUrlContent(url: string): Promise<string | null> {
+  try {
+    const response = await fetch(url);
+    if (response.ok) {
+      return await response.text();
+    }
+  } catch (error: any) {
+    log("DEBUG", `Failed to fetch URL content: ${url}`, { error: error.message });
+  }
+  return null;
+}
+
+// Helper function to process linked content for additional links
+async function processLinkedContent(
+  content: string,
+  owner: string, 
+  repo: string,
+  depth: number,
+  visitedUrls: Set<string>
+): Promise<string> {
+  if (depth >= 3) return content;
+  
+  const links = extractMarkdownLinks(content);
+  let processedContent = content;
+  
+  for (const link of links) {
+    const resolvedUrl = resolveGitHubUrl(link.url, owner, repo);
+    if (!resolvedUrl || visitedUrls.has(resolvedUrl)) {
+      continue;
+    }
+    
+    visitedUrls.add(resolvedUrl);
+    const linkedContent = await fetchUrlContent(resolvedUrl);
+    if (linkedContent) {
+      const nestedContent = await processLinkedContent(linkedContent, owner, repo, depth + 1, visitedUrls);
+      processedContent += `\n\n--- Content from ${link.text} (${link.url}) ---\n${nestedContent}`;
+    }
+  }
+  
+  return processedContent;
+}
+
 async function loadContributingGuidelines(
   octokit: any,
   owner: string,
-  repo: string
+  repo: string,
+  depth: number = 0,
+  visitedUrls: Set<string> = new Set()
 ): Promise<string | null> {
-  const cacheKey = `${owner}/${repo}`;
+  const maxDepth = 3;
+  if (depth >= maxDepth) {
+    log("DEBUG", `Maximum recursion depth reached for ${owner}/${repo}`);
+    return null;
+  }
 
+  const cacheKey = `${owner}/${repo}:${depth}`;
+  
   // Check cache first
   if (config.enableCaching && cache.has(cacheKey)) {
     const cached = cache.get(cacheKey)!;
@@ -116,7 +196,7 @@ async function loadContributingGuidelines(
       log("INFO", `Contributing guidelines loaded from cache for ${cacheKey}`);
       return cached.content;
     } else {
-      cache.delete(cacheKey); // Remove expired cache
+      cache.delete(cacheKey);
     }
   }
 
@@ -124,11 +204,15 @@ async function loadContributingGuidelines(
 
   const altPaths = [
     "CONTRIBUTING.md",
-    "contributing.md",
+    "contributing.md", 
     ".github/CONTRIBUTING.md",
     "docs/CONTRIBUTING.md",
   ];
 
+  let mainContent = "";
+  let foundPath = "";
+
+  // First, get the main contributing guidelines
   for (const path of altPaths) {
     try {
       const response = await octokit.request(
@@ -141,31 +225,63 @@ async function loadContributingGuidelines(
       );
 
       if (response.data.content) {
-        const content = Buffer.from(response.data.content, "base64").toString(
-          "utf-8"
-        );
-
-        // Cache the result
-        if (config.enableCaching) {
-          cache.set(cacheKey, {
-            content,
-            timestamp: Date.now(),
-          });
-        }
-
-        log("INFO", `Contributing guidelines found at ${path} for ${cacheKey}`);
-        return content;
+        mainContent = Buffer.from(response.data.content, "base64").toString("utf-8");
+        foundPath = path;
+        log("INFO", `Contributing guidelines found at ${path} for ${owner}/${repo}`);
+        break;
       }
     } catch (error: any) {
       log("DEBUG", `Failed to load contributing guidelines from ${path}`, {
         error: error.message,
       });
-      // Continue to next path
     }
   }
 
-  log("WARN", `No contributing guidelines found for ${cacheKey}`);
-  return null;
+  if (!mainContent) {
+    log("WARN", `No contributing guidelines found for ${owner}/${repo}`);
+    return null;
+  }
+
+  let aggregatedContent = mainContent;
+  
+  if (depth < maxDepth - 1) {
+    const links = extractMarkdownLinks(mainContent);
+    log("DEBUG", `Found ${links.length} markdown links in ${foundPath}`, { links: links.map(l => l.url) });
+    
+    for (const link of links) {
+      const resolvedUrl = resolveGitHubUrl(link.url, owner, repo);
+      if (!resolvedUrl || visitedUrls.has(resolvedUrl)) {
+        continue;
+      }
+      
+      visitedUrls.add(resolvedUrl);
+      log("DEBUG", `Following link: ${link.text} -> ${resolvedUrl}`);
+      
+      const linkedContent = await fetchUrlContent(resolvedUrl);
+      if (linkedContent) {
+        const processedLinkedContent = await processLinkedContent(
+          linkedContent, 
+          owner, 
+          repo, 
+          depth + 1, 
+          visitedUrls
+        );
+        
+        aggregatedContent += `\n\n--- Content from ${link.text} (${link.url}) ---\n${processedLinkedContent}`;
+        log("INFO", `Successfully aggregated content from ${resolvedUrl}`);
+      }
+    }
+  }
+
+  // Cache the aggregated result
+  if (config.enableCaching) {
+    cache.set(cacheKey, {
+      content: aggregatedContent,
+      timestamp: Date.now(),
+    });
+  }
+
+  return aggregatedContent;
 }
 
 // Helper function to generate friendly response using Claude
@@ -180,6 +296,8 @@ async function generateFriendlyResponse(
     log("INFO", `Generating AI response for ${submissionType}`);
 
     const systemPrompt = `You are a GitHub bot that enforces contributing guidelines. Only comment when there are clear, specific violations of the contributing guidelines.
+
+The contributing guidelines may include content from multiple linked documents that have been automatically aggregated to provide comprehensive context.
 
 DO NOT comment for:
 - Minor style, grammar, or formatting issues
