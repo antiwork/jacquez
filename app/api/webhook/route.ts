@@ -4,10 +4,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import { parseAIResponse } from "../../../utils/jsonParser";
 import { 
   fetchPRFiles, 
+  fetchPushFiles,
+  findAssociatedPRs,
   parseDiffForChangedLines, 
   generateCodeAnalysisResponse, 
   handlePullRequestCodeReview,
   handlePullRequestCodeReviewWithViolations,
+  handlePushCodeReviewWithViolations,
   createCheckRun,
   updateCheckRun
 } from "../../../utils/prCodeReview";
@@ -409,7 +412,7 @@ async function handlePullRequestOpened({ octokit, payload }: any) {
 
   try {
     // Create check run at the start
-    checkRunId = await createCheckRun(octokit, owner, repo, headSha, prNumber);
+    checkRunId = await createCheckRun(octokit, owner, repo, headSha, `https://github.com/${owner}/${repo}/pull/${prNumber}`);
     log("INFO", `Created check run ${checkRunId}`, repoInfo);
 
     // Load contributing guidelines
@@ -729,9 +732,151 @@ async function handleIssueCommentCreated({ octokit, payload }: any) {
   }
 }
 
+// Handle push events
+async function handlePush({ octokit, payload }: any) {
+  const owner = payload.repository.owner.login;
+  const repo = payload.repository.name;
+  const beforeSha = payload.before;
+  const afterSha = payload.after;
+  const headCommit = payload.head_commit;
+  const ref = payload.ref;
+  const repoInfo = { owner, repo, ref, afterSha };
+
+  // Skip if this is a branch deletion
+  if (payload.deleted) {
+    log("INFO", "Skipping branch deletion push", repoInfo);
+    return;
+  }
+
+  // Skip if no commits
+  if (!headCommit || !payload.commits || payload.commits.length === 0) {
+    log("INFO", "Skipping push with no commits", repoInfo);
+    return;
+  }
+
+  log("INFO", `Push event received`, {
+    commits: payload.commits.length,
+    author: headCommit.author.name,
+    message: headCommit.message,
+    ...repoInfo,
+  });
+
+  // Skip if commit is from a bot
+  if (headCommit.author.name.includes('[bot]') || headCommit.author.email.includes('noreply')) {
+    log("INFO", "Skipping bot commit", repoInfo);
+    return;
+  }
+
+  let checkRunId: number | null = null;
+  const violations: string[] = [];
+
+  try {
+    // Create check run at the start
+    checkRunId = await createCheckRun(octokit, owner, repo, afterSha);
+    log("INFO", `Created check run ${checkRunId}`, repoInfo);
+
+    // Load contributing guidelines
+    const contributingContent = await loadContributingGuidelines(
+      octokit,
+      owner,
+      repo
+    );
+
+    if (contributingContent) {
+      if (containsAsideKeyword(headCommit.message)) {
+        log("INFO", `Skipping commit analysis due to "aside" keyword`, repoInfo);
+        await updateCheckRun(octokit, owner, repo, checkRunId, "success", []);
+        return;
+      }
+
+      // Analyze commit message against guidelines
+      const response = await generateFriendlyResponse(
+        contributingContent,
+        headCommit.message,
+        "commit message",
+        repoInfo,
+        ""
+      );
+
+      // Track commit message violations
+      if (response.comment_needed) {
+        violations.push(`Commit Message: ${response.reasoning}`);
+      }
+
+      // Handle code review for file changes
+      const codeViolations = await handlePushCodeReviewWithViolations({
+        octokit,
+        payload,
+        loadContributingGuidelines,
+        anthropic,
+        config
+      });
+      
+      violations.push(...codeViolations);
+    }
+
+    // Update check run based on violations
+    const hasViolations = violations.length > 0;
+    await updateCheckRun(
+      octokit,
+      owner,
+      repo,
+      checkRunId,
+      hasViolations ? "failure" : "success",
+      violations
+    );
+
+    // Post summary comment to associated PRs if there are violations
+    if (hasViolations) {
+      const associatedPRs = await findAssociatedPRs(octokit, owner, repo, afterSha);
+      
+      for (const pr of associatedPRs) {
+        if (pr.state === 'open') {
+          const summaryComment = `## 🚫 Contributing Guidelines Violations
+
+The following issues were found in commit ${afterSha.substring(0, 7)}:
+
+${violations.map(v => `• ${v}`).join('\n')}
+
+**To rerun this check:** Push new commits to address the violations.
+
+Please address these issues in your next commit.`;
+
+          await octokit.request(
+            "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+            {
+              owner: owner,
+              repo: repo,
+              issue_number: pr.number,
+              body: summaryComment,
+            }
+          );
+
+          log("INFO", `Posted summary comment to PR #${pr.number} for ${violations.length} violations`, repoInfo);
+        }
+      }
+    }
+
+  } catch (error: any) {
+    log("ERROR", `Error handling push event`, {
+      error: error.message,
+      stack: error.stack,
+      ...repoInfo,
+    });
+
+    if (checkRunId) {
+      try {
+        await updateCheckRun(octokit, owner, repo, checkRunId, "failure", ["Internal error during review"]);
+      } catch (updateError: any) {
+        log("ERROR", `Failed to update check run after error`, { updateError: updateError.message, ...repoInfo });
+      }
+    }
+  }
+}
+
 
 // Register event listeners
-app.webhooks.on("pull_request.opened", handlePullRequestOpened);
+app.webhooks.on("push", handlePush);
 // app.webhooks.on("issues.opened", handleIssueOpened);
 // app.webhooks.on("issue_comment.created", handleIssueCommentCreated);
 

@@ -5,7 +5,7 @@ export async function createCheckRun(
   owner: string,
   repo: string,
   headSha: string,
-  prNumber: number
+  detailsUrl?: string
 ): Promise<number> {
   try {
     const response = await octokit.request(
@@ -16,10 +16,10 @@ export async function createCheckRun(
         name: "Jacquez Guidelines Review",
         head_sha: headSha,
         status: "in_progress",
-        details_url: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
+        details_url: detailsUrl || `https://github.com/${owner}/${repo}/commit/${headSha}`,
         output: {
           title: "Reviewing contributing guidelines compliance",
-          summary: "Jacquez is analyzing your PR against the repository's contributing guidelines..."
+          summary: "Jacquez is analyzing your commit against the repository's contributing guidelines..."
         }
       }
     );
@@ -301,6 +301,64 @@ export async function handlePullRequestCodeReview({
   }
 }
 
+export async function fetchPushFiles(
+  octokit: any,
+  owner: string,
+  repo: string,
+  beforeSha: string,
+  afterSha: string
+): Promise<any[]> {
+  try {
+    console.log(`Fetching push files for ${owner}/${repo} ${beforeSha}...${afterSha}`);
+    
+    const response = await octokit.request(
+      "GET /repos/{owner}/{repo}/compare/{basehead}",
+      {
+        owner,
+        repo,
+        basehead: `${beforeSha}...${afterSha}`,
+        per_page: 100,
+      }
+    );
+
+    return response.data.files || [];
+  } catch (error: any) {
+    console.error(`Error fetching push files for ${owner}/${repo}`, {
+      error: error.message,
+      beforeSha,
+      afterSha,
+    });
+    return [];
+  }
+}
+
+export async function findAssociatedPRs(
+  octokit: any,
+  owner: string,
+  repo: string,
+  commitSha: string
+): Promise<any[]> {
+  try {
+    const response = await octokit.request(
+      "GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls",
+      {
+        owner,
+        repo,
+        commit_sha: commitSha,
+      }
+    );
+
+    return response.data || [];
+  } catch (error: any) {
+    console.error(`Error finding associated PRs for commit ${commitSha}`, {
+      error: error.message,
+      owner,
+      repo,
+    });
+    return [];
+  }
+}
+
 export async function handlePullRequestCodeReviewWithViolations({ 
   octokit, 
   payload, 
@@ -392,6 +450,73 @@ export async function handlePullRequestCodeReviewWithViolations({
     return violations;
   } catch (error: any) {
     console.error(`Error handling PR code review`, {
+      error: error.message,
+      stack: error.stack,
+      ...repoInfo,
+    });
+    return violations;
+  }
+}
+
+export async function handlePushCodeReviewWithViolations({ 
+  octokit, 
+  payload, 
+  loadContributingGuidelines, 
+  anthropic, 
+  config 
+}: any): Promise<string[]> {
+  const owner = payload.repository.owner.login;
+  const repo = payload.repository.name;
+  const beforeSha = payload.before;
+  const afterSha = payload.after;
+  const repoInfo = { owner, repo, beforeSha, afterSha };
+  const violations: string[] = [];
+
+  console.log(`Analyzing push code for review`, {
+    ref: payload.ref,
+    commits: payload.commits?.length || 0,
+    ...repoInfo,
+  });
+
+  try {
+    const contributingContent = await loadContributingGuidelines(
+      octokit,
+      owner,
+      repo
+    );
+
+    if (!contributingContent) {
+      console.log("No contributing guidelines found, skipping code review", repoInfo);
+      return violations;
+    }
+
+    const pushFiles = await fetchPushFiles(octokit, owner, repo, beforeSha, afterSha);
+    
+    for (const file of pushFiles) {
+      if (!file.patch) continue;
+      
+      const changedLines = parseDiffForChangedLines(file.patch);
+      if (changedLines.length === 0) continue;
+
+      const codeAnalysis = await generateCodeAnalysisResponse(
+        contributingContent,
+        file.filename,
+        changedLines,
+        repoInfo,
+        anthropic,
+        config
+      );
+
+      for (const analysis of codeAnalysis) {
+        if (analysis.position !== undefined && analysis.comment) {
+          violations.push(`${file.filename}: ${analysis.comment}`);
+        }
+      }
+    }
+
+    return violations;
+  } catch (error: any) {
+    console.error(`Error handling push code review`, {
       error: error.message,
       stack: error.stack,
       ...repoInfo,
