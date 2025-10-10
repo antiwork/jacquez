@@ -2,6 +2,8 @@
 
 Thanks for your interest in contributing! For setup instructions, please refer to our [README](README.md).
 
+For general Antiwork contributing guidelines including AI disclosure requirements, please see the [main Antiwork Contributing Guidelines](https://github.com/antiwork/.github/blob/main/CONTRIBUTING.md).
+
 ## Issue Requirements
 
 All issues must include both a **"what"** and a **"why"** section:
